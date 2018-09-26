@@ -1,3 +1,4 @@
+import parseUrl from "url-parse"
 import win from "core/window"
 import { btoa, buildFormData } from "core/utils"
 
@@ -73,7 +74,7 @@ export const authorizePassword = ( auth ) => ( { authActions } ) => {
   let { schema, name, username, password, passwordType, clientId, clientSecret } = auth
   let form = {
     grant_type: "password",
-    scope: encodeURIComponent(auth.scopes.join(scopeSeparator))
+    scope: auth.scopes.join(scopeSeparator)
   }
   let query = {}
   let headers = {}
@@ -139,14 +140,24 @@ export const authorizeAccessCodeWithBasicAuthentication = ( { auth, redirectUrl 
   return authActions.authorizeRequest({body: buildFormData(form), name, url: schema.get("tokenUrl"), auth, headers})
 }
 
-export const authorizeRequest = ( data ) => ( { fn, authActions, errActions, authSelectors } ) => {
+export const authorizeRequest = ( data ) => ( { fn, getConfigs, authActions, errActions, oas3Selectors, specSelectors, authSelectors } ) => {
   let { body, query={}, headers={}, name, url, auth } = data
-  let { additionalQueryStringParams } = authSelectors.getConfigs() || {}
-  let fetchUrl = url
 
-  for (let key in additionalQueryStringParams) {
-    url += "&" + key + "=" + encodeURIComponent(additionalQueryStringParams[key])
+  let { additionalQueryStringParams } = authSelectors.getConfigs() || {}
+
+  let parsedUrl
+
+  if (specSelectors.isOAS3()) {
+    parsedUrl = parseUrl(url, oas3Selectors.selectedServer(), true)
+  } else {
+    parsedUrl = parseUrl(url, specSelectors.url(), true)
   }
+
+  if(typeof additionalQueryStringParams === "object") {
+    parsedUrl.query = Object.assign({}, parsedUrl.query, additionalQueryStringParams)
+  }
+
+  const fetchUrl = parsedUrl.toString()
 
   let _headers = Object.assign({
     "Accept":"application/json, text/plain, */*",
@@ -158,7 +169,9 @@ export const authorizeRequest = ( data ) => ( { fn, authActions, errActions, aut
     method: "post",
     headers: _headers,
     query: query,
-    body: body
+    body: body,
+    requestInterceptor: getConfigs().requestInterceptor,
+    responseInterceptor: getConfigs().responseInterceptor
   })
   .then(function (response) {
     let token = JSON.parse(response.data)
@@ -189,11 +202,28 @@ export const authorizeRequest = ( data ) => ( { fn, authActions, errActions, aut
   })
   .catch(e => {
     let err = new Error(e)
+    let message = err.message
+    // swagger-js wraps the response (if available) into the e.response property;
+    // investigate to check whether there are more details on why the authorization
+    // request failed (according to RFC 6479).
+    // See also https://github.com/swagger-api/swagger-ui/issues/4048
+    if (e.response && e.response.data) {
+      const errData = e.response.data
+      try {
+        const jsonResponse = typeof errData === "string" ? JSON.parse(errData) : errData
+        if (jsonResponse.error)
+          message += `, error: ${jsonResponse.error}`
+        if (jsonResponse.error_description)
+          message += `, description: ${jsonResponse.error_description}`
+      } catch (jsonError) {
+        // Ignore
+      }
+    }
     errActions.newAuthErr( {
       authId: name,
       level: "error",
       source: "auth",
-      message: err.message
+      message: message
     } )
   })
 }
